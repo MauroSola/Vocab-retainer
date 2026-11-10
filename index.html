@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Vocab">
+<title>Vocab</title>
+<style>
+:root{--bg:#f1f0ee;--fg:#1c1b22;--mut:#6f6b72;--card:#fff;--line:#d9d6d2;--acc:#7a1f2b;--on:#fff;--ok:#2b7a4b;--bad:#b3261e;color-scheme:light}
+@media (prefers-color-scheme:dark){:root{--bg:#17141a;--fg:#ece8e1;--mut:#9d97a3;--card:#221e26;--line:#3a3440;--acc:#d1a85a;--on:#17141a;--ok:#6fcf97;--bad:#f08a80;color-scheme:dark}}
+*{box-sizing:border-box}
+html{background:var(--bg)}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 -apple-system,system-ui,"Segoe UI",sans-serif;padding:env(safe-area-inset-top,0) 0 env(safe-area-inset-bottom,0)}
+#app{max-width:560px;margin:0 auto;padding:12px 16px 40px}
+nav{display:flex;gap:6px;margin-bottom:16px}
+nav button{flex:1;padding:10px;border:1px solid var(--line);background:none;color:var(--mut);border-radius:8px;font:inherit;font-weight:600}
+nav button.on{background:var(--acc);color:var(--on);border-color:var(--acc)}
+button,select,textarea{font:inherit;color:var(--fg)}
+select,textarea{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px}
+textarea{width:100%;min-height:180px}
+.row{display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
+.mut{color:var(--mut);font-size:14px}
+h2{font:600 40px/1.15 Georgia,"Iowan Old Style",serif;margin:16px 0 2px;overflow-wrap:anywhere}
+.def{font:20px/1.45 Georgia,"Iowan Old Style",serif;margin:16px 0}
+.opt{display:block;width:100%;text-align:left;margin:8px 0;padding:14px;background:var(--card);border:1px solid var(--line);border-radius:8px;font-size:16px}
+.opt.ok{border:2px solid var(--ok);background:color-mix(in srgb,var(--ok) 14%,var(--card))}
+.opt.bad{border:2px solid var(--bad);background:color-mix(in srgb,var(--bad) 14%,var(--card))}
+.info{margin:14px 0;padding:14px;border-left:4px solid var(--acc);background:var(--card);border-radius:0 8px 8px 0}
+.go,.pri{background:var(--acc);color:var(--on);border:0;border-radius:8px;padding:12px 18px;font-weight:600}
+.go{width:100%}
+.wd{display:flex;gap:8px;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--line)}
+.wd b{font-family:Georgia,serif;font-size:18px}
+.tag{font-size:12px;color:var(--mut);border:1px solid var(--line);border-radius:4px;padding:0 4px}
+.act{display:flex;gap:4px;align-items:flex-start}
+.act button,#ex{background:none;border:1px solid var(--line);border-radius:6px;padding:4px 8px}
+input{width:100%;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px;color:var(--fg);font:inherit}
+label{display:block;margin-top:10px}
+.wd textarea{min-height:0;width:100%}
+.plain{background:none;border:1px solid var(--line);border-radius:6px;padding:4px 8px;color:var(--fg)}
+.warn{color:var(--bad);border-color:var(--bad)}
+</style>
+</head>
+<body>
+<div id="app">
+<nav>
+<button data-t="quiz" class="on">Quiz</button>
+<button data-t="words">Words</button>
+<button data-t="add">Add words</button>
+</nav>
+<section id="quiz"></section>
+<section id="words" hidden></section>
+<section id="add" hidden>
+<p class="mut">Paste one word per line, or load a CSV file. Optional extras after a comma: a language (en, es or fr), then a sentence where you read the word, which helps pick the right meaning. Example: <i>bank,en,sat on the river bank</i></p>
+<textarea id="ta" placeholder="ephemeral&#10;lugubre,es&#10;bank,en,sat on the river bank"></textarea>
+<div class="row" style="margin-top:10px">
+<select id="dl"><option value="en">Default: English</option><option value="es">Default: Spanish</option><option value="fr">Default: French</option></select>
+<input type="file" id="file" accept=".csv,.txt">
+</div>
+<button class="pri" id="addbtn">Add and look up</button>
+<p class="mut" id="st"></p>
+</section>
+</div>
+<script>
+const KEY='vocab.v1',LANGS={en:'English',es:'Spanish',fr:'French'};
+let words=load(),tab='quiz',mode='w2d',qlang='en',q=null,score=0,total=0,queue=[],ei=-1,di=-1,net=false;
+function load(){try{return JSON.parse(localStorage.getItem(KEY))||[]}catch(e){return[]}}
+function save(){try{localStorage.setItem(KEY,JSON.stringify(words))}catch(e){}}
+const $=id=>document.getElementById(id);
+const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const shuffle=a=>{a=[...a];for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]]}return a};
+const langOpts=v=>Object.keys(LANGS).map(k=>'<option value="'+k+'"'+(k===v?' selected':'')+'>'+LANGS[k]+'</option>').join('');
+
+function pick(r,i){
+  const S=r.senses||[];
+  if(!S.length)return;
+  if(i===undefined){
+    const toks=(r.ctx||'').toLowerCase().split(/[^\p{L}]+/u).filter(t=>t.length>3&&t!==r.word.toLowerCase());
+    let bs=-1;i=0;
+    S.forEach((s,k)=>{const h=(s.def+' '+s.ex).toLowerCase(),sc=toks.filter(t=>h.includes(t)).length;if(sc>bs){bs=sc;i=k}});
+  }
+  r.def=S[i].def;r.pos=S[i].pos;r.ex=S[i].ex;
+}
+
+async function lookup(w,lang,ctx){
+  const r={word:w,lang,def:'',pos:'',ex:'',tr:'',ctx:ctx||'',senses:[]};
+  try{
+    const x=await fetch('https://api.dictionaryapi.dev/api/v2/entries/'+lang+'/'+encodeURIComponent(w));
+    if(x.ok){
+      const j=await x.json();
+      for(const e of j)for(const m of e.meanings||[])for(const d of m.definitions||[])
+        if(r.senses.length<10)r.senses.push({pos:m.partOfSpeech||'',def:d.definition,ex:d.example||''});
+    }else if(x.status!==404)net=true;
+  }catch(e){net=true}
+  pick(r);
+  try{
+    const to=lang==='en'?'es':'en';
+    const x=await fetch('https://api.mymemory.translated.net/get?q='+encodeURIComponent(w)+'&langpair='+lang+'|'+to);
+    const j=await x.json();
+    r.tr=(j.responseData&&j.responseData.translatedText)||'';
+    if(r.tr.toLowerCase()===w.toLowerCase())r.tr='';
+  }catch(e){net=true}
+  return r;
+}
+
+function netMsg(){return net?' Some lookups failed to reach the dictionary service. Check your connection, and make sure you opened the hosted page in your browser, not a preview inside another app.':''}
+
+async function addWords(){
+  const def=$('dl').value,todo=[];net=false;
+  $('ta').value.split(/\r?\n/).map(l=>l.trim()).filter(Boolean).forEach((l,i)=>{
+    const p=l.split(',').map(s=>s.trim());
+    const w=p[0].replace(/^["']|["']$/g,'');
+    let lang=(p[1]||'').toLowerCase(),rest=p.slice(1);
+    if(LANGS[lang]||(p.length>2&&!lang))rest=p.slice(2);
+    if(!LANGS[lang])lang=def;
+    const ctx=rest.join(', ').replace(/^["']|["']$/g,'');
+    if(i===0&&w.toLowerCase()==='word')return;
+    const lw=w.toLowerCase();
+    if(w&&!words.some(x=>x.word.toLowerCase()===lw&&x.lang===lang)&&!todo.some(t=>t.word.toLowerCase()===lw&&t.lang===lang))todo.push({word:w,lang,ctx});
+  });
+  if(!todo.length){$('st').textContent='No new words found.';return}
+  $('addbtn').disabled=true;
+  let miss=0;
+  for(let i=0;i<todo.length;i+=4){
+    const res=await Promise.all(todo.slice(i,i+4).map(t=>lookup(t.word,t.lang,t.ctx)));
+    res.forEach(r=>{if(!r.def)miss++});
+    words.push(...res);save();
+    $('st').textContent='Looked up '+Math.min(i+4,todo.length)+' of '+todo.length+'…';
+  }
+  $('st').textContent='Added '+todo.length+' words. '+(miss?miss+' have no definition yet: open the Words tab to retry or write one yourself.':'All have definitions.')+netMsg();
+  $('ta').value='';$('addbtn').disabled=false;queue=[];q=null;render();
+}
+
+async function retry(list){
+  net=false;
+  for(const i of list){
+    const w=words[i],r=await lookup(w.word,w.lang,w.ctx);
+    if(r.def)words[i]=r;
+  }
+  save();queue=[];q=null;render();
+  if(net)alert('Could not reach the dictionary service.'+netMsg());
+}
+
+function next(){
+  const p=words.filter(w=>w.def&&w.lang===qlang);
+  if(p.length<4){q=null;return render()}
+  if(!queue.length)queue=shuffle(p);
+  const w=queue.pop();
+  if(!p.includes(w))return next();
+  const others=shuffle(p.filter(x=>x!==w&&x.def!==w.def)).slice(0,3);
+  q={w,opts:shuffle([w,...others]),done:false,pick:null};
+  render();
+}
+
+function quizHTML(){
+  let h='<div class="row"><select id="qm"><option value="w2d"'+(mode==='w2d'?' selected':'')+'>Word to definition</option><option value="d2w"'+(mode==='d2w'?' selected':'')+'>Definition to word</option></select><select id="ql">'+langOpts(qlang)+'</select></div>';
+  if(!q)return h+'<p class="mut">Save at least 4 words with definitions in '+LANGS[qlang]+' to start a quiz.</p>'+(words.some(w=>w.lang===qlang&&w.def)?'<button class="go" id="start">Start</button>':'');
+  const w=q.w;
+  h+='<p class="mut">Score '+score+' of '+total+'</p>';
+  h+=mode==='w2d'?'<h2>'+esc(w.word)+'</h2><div class="mut">'+esc(w.pos)+'</div>':'<p class="def">'+esc(w.def)+'</p>';
+  h+=q.opts.map((o,i)=>{
+    let c='opt';
+    if(q.done){if(o===w)c+=' ok';else if(i===q.pick)c+=' bad'}
+    return '<button class="'+c+'" data-i="'+i+'">'+esc(mode==='w2d'?o.def:o.word)+'</button>';
+  }).join('');
+  if(q.done)h+='<div class="info"><b>'+esc(w.word)+'</b>'+(w.tr?' means “'+esc(w.tr)+'”':'')+'<br>'+esc(w.def)+(w.ex?'<br><i>“'+esc(w.ex)+'”</i>':'')+(w.ctx?'<br><span class="mut">Where you read it: “'+esc(w.ctx)+'”</span>':'')+'</div><button class="go" id="nx">Next word</button>';
+  return h;
+}
+
+function editHTML(w,i){
+  const S=w.senses||[];
+  return '<div class="wd"><div style="width:100%"><b>'+esc(w.word)+'</b> <span class="tag">'+w.lang+'</span>'+
+    '<label class="mut">Definition</label><textarea id="e-def" rows="3">'+esc(w.def)+'</textarea>'+
+    '<label class="mut">Translation</label><input id="e-tr" value="'+esc(w.tr)+'">'+
+    '<label class="mut">Example</label><input id="e-ex" value="'+esc(w.ex)+'">'+
+    '<label class="mut">Where you read it (optional)</label><input id="e-ctx" value="'+esc(w.ctx)+'">'+
+    (S.length>1?'<p class="mut">Other meanings found. Tap one to use it:</p>'+S.map((s,k)=>'<button class="opt" data-s="'+k+'"><span class="mut">'+esc(s.pos)+'</span> '+esc(s.def)+'</button>').join(''):'')+
+    '<div class="row" style="margin-top:10px"><button class="pri" id="e-save">Save</button><button id="e-cancel" class="plain">Cancel</button></div></div></div>';
+}
+
+function wordsHTML(){
+  if(!words.length)return '<p class="mut">No words yet. Add some in the Add words tab.</p>';
+  let h='<div class="row"><button id="ex" class="plain">Export CSV</button>'+(words.some(w=>!w.def)?'<button id="rall" class="plain">Retry missing</button>':'')+'<span class="mut">'+words.length+' words</span></div>';
+  words.forEach((w,i)=>{
+    if(i===ei){h+=editHTML(w,i);return}
+    h+='<div class="wd"><div><b>'+esc(w.word)+'</b> <span class="tag">'+w.lang+'</span> <span class="mut">'+esc(w.pos)+'</span>'+(w.tr?' · '+esc(w.tr):'')+
+      '<div class="mut">'+(w.def?esc(w.def):'No definition yet.')+'</div></div>'+
+      '<div class="act">'+(w.def?'':'<button class="plain" data-r="'+i+'">Retry</button>')+'<button class="plain" data-e="'+i+'">Edit</button><button class="plain'+(di===i?' warn':'')+'" data-d="'+i+'" aria-label="Delete">'+(di===i?'Delete?':'✕')+'</button></div></div>';
+  });
+  return h;
+}
+
+function render(){
+  ['quiz','words','add'].forEach(t=>$(t).hidden=t!==tab);
+  document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on',b.dataset.t===tab));
+  if(tab==='quiz')$('quiz').innerHTML=quizHTML();
+  if(tab==='words')$('words').innerHTML=wordsHTML();
+}
+
+function exportCSV(){
+  const c=s=>'"'+String(s||'').replace(/"/g,'""')+'"';
+  const csv='word,lang,definition,translation,example,context\n'+words.map(w=>[w.word,w.lang,w.def,w.tr,w.ex,w.ctx].map(c).join(',')).join('\n');
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
+  a.download='vocab.csv';a.click();
+}
+
+document.addEventListener('click',e=>{
+  const t=e.target.closest('button');if(!t)return;
+  if(t.dataset.d===undefined&&di!==-1){di=-1;if(tab==='words'&&!t.dataset.e&&!t.dataset.s&&!t.dataset.r&&!t.id)render()}
+  if(t.dataset.t){tab=t.dataset.t;if(tab==='quiz'&&!q)next();else render();return}
+  if(t.id==='addbtn')return addWords();
+  if(t.id==='start'||t.id==='nx')return next();
+  if(t.id==='ex')return exportCSV();
+  if(t.id==='rall')return retry(words.map((w,i)=>w.def?-1:i).filter(i=>i>=0));
+  if(t.dataset.r!==undefined)return retry([+t.dataset.r]);
+  if(t.dataset.i!==undefined&&q&&!q.done){
+    q.pick=+t.dataset.i;q.done=true;total++;
+    if(q.opts[q.pick]===q.w)score++;
+    return render();
+  }
+  if(t.dataset.d!==undefined){
+    const i=+t.dataset.d;
+    if(di===i){words.splice(i,1);save();queue=[];q=null;di=-1}else di=i;
+    return render();
+  }
+  if(t.dataset.e!==undefined){ei=+t.dataset.e;return render()}
+  if(t.dataset.s!==undefined&&ei>=0){pick(words[ei],+t.dataset.s);save();queue=[];return render()}
+  if(t.id==='e-cancel'){ei=-1;return render()}
+  if(t.id==='e-save'){
+    const w=words[ei];
+    w.def=$('e-def').value.trim();w.tr=$('e-tr').value.trim();w.ex=$('e-ex').value.trim();w.ctx=$('e-ctx').value.trim();
+    save();ei=-1;queue=[];q=null;render();
+  }
+});
+document.addEventListener('change',e=>{
+  if(e.target.id==='qm'){mode=e.target.value;queue=[];next()}
+  if(e.target.id==='ql'){qlang=e.target.value;queue=[];score=0;total=0;next()}
+  if(e.target.id==='file'&&e.target.files[0])e.target.files[0].text().then(t=>{$('ta').value=t});
+});
+next();
+</script>
+</body>
+</html>
