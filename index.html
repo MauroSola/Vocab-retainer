@@ -83,7 +83,7 @@ function pick(r,i){
     let bs=-1;i=0;
     S.forEach((s,k)=>{const h=(s.def+' '+s.ex).toLowerCase(),sc=toks.filter(t=>h.includes(t)).length;if(sc>bs){bs=sc;i=k}});
   }
-  r.def=S[i].def;r.pos=S[i].pos;r.ex=S[i].ex;
+  r.def=S[i].def;r.pos=S[i].pos;r.ex=S[i].ex;r.via=S[i].via||'';
 }
 
 const strip=h=>{try{return (new DOMParser().parseFromString(String(h),'text/html').body.textContent||'').replace(/\s+/g,' ').trim()}catch(e){return ''}};
@@ -126,6 +126,7 @@ function wtClean(t){
     const p=b.split('|'),n=p[0].trim().toLowerCase();
     if(['plm','lien','lien-ancre','w','p','term'].includes(n))return p[1]||'';
     if(n==='l'||n==='l-self')return p[2]||p[1]||'';
+    if(/^forma\b/.test(n))return 'Forma de '+(p[1]||'');
     return '';
   });
   return t.replace(/<ref[^>]*>.*?<\/ref>/gs,'').replace(/<[^>]+>/g,'').replace(/\[\[(?:[^\]|]*\|)?([^\]]*)\]\]/g,'$1').replace(/'{2,}/g,'').replace(/\(\s*\)/g,'').replace(/\s+/g,' ').replace(/^[\s:;,.\-]+/,'').trim();
@@ -172,10 +173,11 @@ async function tran(w,from,to){
 }
 
 async function fetchSenses(w,lang){
-  const r={senses:[]};
-  if(lang!=='en')await nativeWikt(w,lang,r);
-  if(!r.senses.length)await dict1(w,lang,r);
-  if(!r.senses.length)await enWikt(w,lang,r);
+  const r={senses:[]};let via='';
+  if(lang!=='en'){await nativeWikt(w,lang,r);if(r.senses.length)via=lang+'.wiktionary'}
+  if(!r.senses.length){await dict1(w,lang,r);if(r.senses.length)via='dictionaryapi'}
+  if(!r.senses.length){await enWikt(w,lang,r);if(r.senses.length)via='en.wiktionary'}
+  r.senses.forEach(x=>x.via=via);
   return r.senses;
 }
 
@@ -188,20 +190,24 @@ const FORM={
     of:/\b(?:de|del)\s+([\p{L}-]+)[\s.;:]*$/iu,
     der:/^(?:acción y efecto|acción|efecto|cualidad|calidad|estado|condición)\s+de\s+(?:ser\s+)?([\p{L}-]+)[\s.]*$/iu},
   fr:{lead:L('participe pluriel féminin masculin singulier forme variante première deuxième troisième orthographe graphie conjugaison infinitif subjonctif indicatif impératif'),
-    of:/(?:\bde\s+|\bdu\s+|\bd['’])([\p{L}-]+)[\s.;:]*$/iu,
+    of:/(?:\bde\s+|\bdu\s+|\bd['’])(?:l['’]|le\s+|la\s+)?(?:verbe\s+|adjectif\s+|nom\s+)?([\p{L}-]+)[\s.;:]*$/iu,
     der:/^(?:action|fait|état|qualité|propriété|résultat|caractère)\s+(?:de\s+|du\s+|d['’])(?:être\s+)?([\p{L}-]+)[\s.]*$/iu}
 };
 function formRoot(def,lang,word){
-  const R=FORM[lang],d=String(def||'').replace(/\([^)]*\)/g,'').trim();
-  if(!R||!d||d.split(/\s+/).length>16)return '';
-  const wl=word.toLowerCase();let root='';
-  const first=d.split(/[\s,]+/)[0].toLowerCase().replace(/[^\p{L}-]/gu,'');
-  if(R.lead.has(first)){const m=d.match(R.of);if(m)root=m[1]}
-  if(!root){
-    const m=d.match(R.der);
-    if(m){const b=m[1].toLowerCase(),n=Math.min(3,wl.length,b.length);if(wl.slice(0,n)===b.slice(0,n))root=m[1]}
+  const d=String(def||'').replace(/\([^)]*\)/g,'').trim();
+  if(!d||d.split(/\s+/).length>16)return '';
+  const wl=word.toLowerCase(),first=d.split(/[\s,]+/)[0].toLowerCase().replace(/[^\p{L}-]/gu,'');
+  for(const R of new Set([FORM[lang],FORM.en])){
+    if(!R)continue;
+    let root='';
+    if(R.lead.has(first)){const m=d.match(R.of);if(m)root=m[1]}
+    if(!root){
+      const m=d.match(R.der);
+      if(m){const b=m[1].toLowerCase(),n=Math.min(3,wl.length,b.length);if(wl.slice(0,n)===b.slice(0,n))root=m[1]}
+    }
+    if(root&&root.toLowerCase()!==wl)return root;
   }
-  return root&&root.toLowerCase()!==wl?root:'';
+  return '';
 }
 async function withRoot(w,lang,senses,depth){
   const hit=senses.find(s=>formRoot(s.def,lang,w));
@@ -226,7 +232,7 @@ async function gloss(w,lang,pos){
 async function lookup(w,lang,ctx){
   const r={word:w,lang,def:'',pos:'',ex:'',trs:{},ctx:ctx||'',senses:[],root:''};
   const base=await fetchSenses(w,lang),wr=await withRoot(w,lang,base,0);
-  r.senses=wr.senses;r.root=wr.root;
+  r.senses=wr.senses;r.root=wr.root;r.rootTried=true;
   pick(r);
   const ks=otherLangs(lang);
   let g='';
@@ -356,15 +362,17 @@ function editHTML(w,i){
     '<div class="row" style="margin-top:10px"><button class="pri" id="e-save">Save</button><button id="e-cancel" class="plain">Cancel</button><button id="e-lu" class="plain">Look up again (replaces everything here)</button></div></div></div>';
 }
 
+function formIdx(){return words.map((w,i)=>(!w.rootTried&&w.def&&formRoot(w.def,w.lang,w.word))?i:-1).filter(i=>i>=0)}
+
 function wordsHTML(){
   if(!words.length)return '<p class="mut">No words yet. Add some in the Add words tab.</p>';
   const needTr=words.some(w=>otherLangs(w.lang).some(k=>!(w.trs&&w.trs[k])));
-  let h='<div class="row"><button id="ex" class="plain">Export CSV</button>'+(words.some(w=>!w.def)?'<button id="rall" class="plain">Retry missing</button>':'')+(needTr?'<button id="rtr" class="plain">Fill translations</button>':'')+'<span class="mut">'+words.length+' words</span></div>';
+  let h='<div class="row"><button id="ex" class="plain">Export CSV</button>'+(words.some(w=>!w.def)?'<button id="rall" class="plain">Retry missing</button>':'')+(needTr?'<button id="rtr" class="plain">Fill translations</button>':'')+(formIdx().length?'<button id="rform" class="plain">Fix conjugated forms</button>':'')+'<span class="mut">'+words.length+' words</span></div>';
   words.forEach((w,i)=>{
     if(i===ei){h+=editHTML(w,i);return}
     const tl=trLine(w);
     h+='<div class="wd"><div><b>'+esc(w.word)+'</b> <span class="tag">'+w.lang+'</span> <span class="mut">'+esc(w.pos)+'</span>'+(w.root?' <span class="tag">form of '+esc(w.root)+'</span>':'')+(tl?'<div>'+esc(tl)+'</div>':'')+
-      '<div class="mut">'+(w.def?esc(w.def):'No definition yet.')+'</div>'+(w.src?'<div class="mut">From: '+esc(w.src)+'</div>':'')+'</div>'+
+      '<div class="mut">'+(w.def?esc(w.def)+(w.via?' <span class="tag">'+esc(w.via)+'</span>':''):'No definition yet.')+'</div>'+(w.src?'<div class="mut">From: '+esc(w.src)+'</div>':'')+'</div>'+
       '<div class="act">'+(w.def?'':'<button class="plain" data-r="'+i+'">Retry</button>')+'<button class="plain" data-e="'+i+'">Edit</button><button class="plain'+(di===i?' warn':'')+'" data-d="'+i+'" aria-label="Delete">'+(di===i?'Delete?':'✕')+'</button></div></div>';
   });
   return h;
@@ -395,6 +403,7 @@ document.addEventListener('click',e=>{
   if(t.id==='ex')return exportCSV();
   if(t.id==='rall'){busy(t);return retry(words.map((w,i)=>w.def?-1:i).filter(i=>i>=0))}
   if(t.id==='rtr'){busy(t);return fillTrans()}
+  if(t.id==='rform'){busy(t);return retry(formIdx())}
   if(t.id==='e-lu'){busy(t);return lookAgain()}
   if(t.dataset.r!==undefined){busy(t);return retry([+t.dataset.r])}
   if(t.dataset.i!==undefined&&q&&!q.done){
