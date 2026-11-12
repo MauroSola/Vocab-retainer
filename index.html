@@ -53,7 +53,7 @@ button:disabled{opacity:.5}
 <section id="quiz"></section>
 <section id="words" hidden></section>
 <section id="add" hidden>
-<p class="mut">Paste one word per line, or load a CSV file. Optional extras after a comma: a language (en, es or fr), then a sentence where you read the word, which helps pick the right meaning. Example: <i>bank,en,sat on the river bank</i></p>
+<p class="mut">Paste one word per line, or load a CSV file. Optional extras after a comma: a language (en, es or fr), a sentence where you read the word (helps pick the right meaning), then a source such as a book title. Put a sentence in double quotes if it contains commas. Example: <i>bank,en,sat on the river bank,Dorian Gray</i></p>
 <textarea id="ta" placeholder="ephemeral&#10;lugubre,es&#10;bank,en,sat on the river bank"></textarea>
 <div class="row" style="margin-top:10px">
 <select id="dl"><option value="en">Default: English</option><option value="es">Default: Spanish</option><option value="fr">Default: French</option></select>
@@ -244,18 +244,28 @@ async function lookup(w,lang,ctx){
 
 function netMsg(){return fails.size?' Could not reach: '+[...fails].join(', ')+'. If this keeps happening, pause your VPN or content blocker for this site and tell me which names are listed.':''}
 
+function csvLine(l){
+  const out=[];let cur='',q=false;
+  for(let i=0;i<l.length;i++){
+    const c=l[i];
+    if(q){if(c==='"'){if(l[i+1]==='"'){cur+='"';i++}else q=false}else cur+=c}
+    else if(c==='"'&&cur.trim()==='')q=true;
+    else if(c===','){out.push(cur.trim());cur=''}
+    else cur+=c;
+  }
+  out.push(cur.trim());return out;
+}
+
 async function addWords(){
   const def=$('dl').value,todo=[];net=false;fails.clear();
   $('ta').value.split(/\r?\n/).map(l=>l.trim()).filter(Boolean).forEach((l,i)=>{
-    const p=l.split(',').map(s=>s.trim());
-    const w=p[0].replace(/^["']|["']$/g,'');
-    let lang=(p[1]||'').toLowerCase(),rest=p.slice(1);
-    if(LANGS[lang]||(p.length>2&&!lang))rest=p.slice(2);
+    const p=csvLine(l),w=p[0];
+    let lang=(p[1]||'').toLowerCase(),ctx,src;
+    if(LANGS[lang]||(p.length>2&&!lang)){ctx=p[2]||'';src=p[3]||''}else{ctx=p[1]||'';src=p[2]||''}
     if(!LANGS[lang])lang=def;
-    const ctx=rest.join(', ').replace(/^["']|["']$/g,'');
     if(i===0&&w.toLowerCase()==='word')return;
     const lw=w.toLowerCase();
-    if(w&&!words.some(x=>x.word.toLowerCase()===lw&&x.lang===lang)&&!todo.some(t=>t.word.toLowerCase()===lw&&t.lang===lang))todo.push({word:w,lang,ctx});
+    if(w&&!words.some(x=>x.word.toLowerCase()===lw&&x.lang===lang)&&!todo.some(t=>t.word.toLowerCase()===lw&&t.lang===lang))todo.push({word:w,lang,ctx,src});
   });
   if(!todo.length){$('st').textContent='No new words found.';return}
   $('addbtn').disabled=true;
@@ -263,8 +273,8 @@ async function addWords(){
   let miss=0;
   try{
     for(let i=0;i<todo.length;i+=4){
-      const res=await Promise.all(todo.slice(i,i+4).map(t=>lookup(t.word,t.lang,t.ctx)));
-      res.forEach(r=>{if(!r.def)miss++});
+      const chunk=todo.slice(i,i+4),res=await Promise.all(chunk.map(t=>lookup(t.word,t.lang,t.ctx)));
+      res.forEach((r,j)=>{r.src=chunk[j].src||'';if(!r.def)miss++});
       words.push(...res);save();
       $('st').textContent='Looked up '+Math.min(i+4,todo.length)+' of '+todo.length+'…';
     }
@@ -277,7 +287,7 @@ async function retry(list){
   net=false;fails.clear();
   for(const i of list){
     const w=words[i],r=await lookup(w.word,w.lang,w.ctx);
-    if(r.def)words[i]=r;
+    if(r.def){r.src=w.src||'';words[i]=r}
   }
   save();queue=[];q=null;render();
   if(net)alert('Could not reach the lookup services.'+netMsg());
@@ -300,7 +310,7 @@ async function fillTrans(){
 async function lookAgain(){
   const w=words[ei];net=false;fails.clear();
   const r=await lookup(w.word,w.lang,($('e-ctx').value||'').trim()||w.ctx);
-  if(r.def||Object.keys(r.trs).length)words[ei]=r;
+  if(r.def||Object.keys(r.trs).length){r.src=($('e-src').value||'').trim();words[ei]=r}
   save();queue=[];q=null;render();
   if(net)alert('Could not reach the lookup services.'+netMsg());
 }
@@ -329,7 +339,7 @@ function quizHTML(){
   }).join('');
   if(q.done){
     const tl=trLine(w);
-    h+='<div class="info"><b>'+esc(w.word)+'</b>'+(w.root?' <span class="mut">(form of '+esc(w.root)+')</span>':'')+(tl?'<br>'+esc(tl):'')+'<br>'+esc(w.def)+(w.ex?'<br><i>“'+esc(w.ex)+'”</i>':'')+(w.ctx?'<br><span class="mut">Where you read it: “'+esc(w.ctx)+'”</span>':'')+'</div><button class="go" id="nx">Next word</button>';
+    h+='<div class="info"><b>'+esc(w.word)+'</b>'+(w.root?' <span class="mut">(form of '+esc(w.root)+')</span>':'')+(tl?'<br>'+esc(tl):'')+'<br>'+esc(w.def)+(w.ex?'<br><i>“'+esc(w.ex)+'”</i>':'')+(w.ctx?'<br><span class="mut">Where you read it: “'+esc(w.ctx)+'”</span>':'')+(w.src?'<br><span class="mut">From: '+esc(w.src)+'</span>':'')+'</div><button class="go" id="nx">Next word</button>';
   }
   return h;
 }
@@ -340,7 +350,8 @@ function editHTML(w,i){
     '<label class="mut">Definition</label><textarea id="e-def" rows="3">'+esc(w.def)+'</textarea>'+
     otherLangs(w.lang).map(k=>'<label class="mut">Translation ('+LANGS[k]+')</label><input id="e-tr-'+k+'" value="'+esc((w.trs||{})[k]||'')+'">').join('')+
     '<label class="mut">Example</label><input id="e-ex" value="'+esc(w.ex)+'">'+
-    '<label class="mut">Where you read it (optional)</label><input id="e-ctx" value="'+esc(w.ctx)+'">'+
+    '<label class="mut">Sentence where you read it (optional)</label><input id="e-ctx" value="'+esc(w.ctx)+'">'+
+    '<label class="mut">Source: book, article… (optional)</label><input id="e-src" value="'+esc(w.src)+'">'+
     (S.length>1?'<p class="mut">Other meanings found. Tap one to use it:</p>'+S.map((s,k)=>'<button class="opt" data-s="'+k+'"><span class="mut">'+esc(s.pos)+'</span> '+esc(s.def)+'</button>').join(''):'')+
     '<div class="row" style="margin-top:10px"><button class="pri" id="e-save">Save</button><button id="e-cancel" class="plain">Cancel</button><button id="e-lu" class="plain">Look up again (replaces everything here)</button></div></div></div>';
 }
@@ -353,7 +364,7 @@ function wordsHTML(){
     if(i===ei){h+=editHTML(w,i);return}
     const tl=trLine(w);
     h+='<div class="wd"><div><b>'+esc(w.word)+'</b> <span class="tag">'+w.lang+'</span> <span class="mut">'+esc(w.pos)+'</span>'+(w.root?' <span class="tag">form of '+esc(w.root)+'</span>':'')+(tl?'<div>'+esc(tl)+'</div>':'')+
-      '<div class="mut">'+(w.def?esc(w.def):'No definition yet.')+'</div></div>'+
+      '<div class="mut">'+(w.def?esc(w.def):'No definition yet.')+'</div>'+(w.src?'<div class="mut">From: '+esc(w.src)+'</div>':'')+'</div>'+
       '<div class="act">'+(w.def?'':'<button class="plain" data-r="'+i+'">Retry</button>')+'<button class="plain" data-e="'+i+'">Edit</button><button class="plain'+(di===i?' warn':'')+'" data-d="'+i+'" aria-label="Delete">'+(di===i?'Delete?':'✕')+'</button></div></div>';
   });
   return h;
@@ -368,7 +379,7 @@ function render(){
 
 function exportCSV(){
   const c=s=>'"'+String(s||'').replace(/"/g,'""')+'"';
-  const csv='word,lang,definition,en,es,fr,example,context\n'+words.map(w=>[w.word,w.lang,w.def,(w.trs||{}).en,(w.trs||{}).es,(w.trs||{}).fr,w.ex,w.ctx].map(c).join(',')).join('\n');
+  const csv='word,lang,definition,en,es,fr,example,context,source\n'+words.map(w=>[w.word,w.lang,w.def,(w.trs||{}).en,(w.trs||{}).es,(w.trs||{}).fr,w.ex,w.ctx,w.src].map(c).join(',')).join('\n');
   const a=document.createElement('a');
   a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
   a.download='vocab.csv';a.click();
@@ -401,7 +412,7 @@ document.addEventListener('click',e=>{
   if(t.id==='e-cancel'){ei=-1;return render()}
   if(t.id==='e-save'){
     const w=words[ei];
-    w.def=$('e-def').value.trim();w.ex=$('e-ex').value.trim();w.ctx=$('e-ctx').value.trim();
+    w.def=$('e-def').value.trim();w.ex=$('e-ex').value.trim();w.ctx=$('e-ctx').value.trim();w.src=$('e-src').value.trim();
     w.trs={};otherLangs(w.lang).forEach(k=>{const v=$('e-tr-'+k).value.trim();if(v)w.trs[k]=v});
     save();ei=-1;queue=[];q=null;render();
   }
