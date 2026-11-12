@@ -258,7 +258,7 @@ function csvLine(l){
 
 async function addWords(){
   const def=$('dl').value,todo=[];net=false;fails.clear();
-  $('ta').value.split(/\r?\n/).map(l=>l.trim()).filter(Boolean).forEach((l,i)=>{
+  $('ta').value.replace(/^\ufeff/,'').split(/\r?\n/).map(l=>l.trim()).filter(Boolean).forEach((l,i)=>{
     const p=csvLine(l),w=p[0];
     let lang=(p[1]||'').toLowerCase(),ctx,src;
     if(LANGS[lang]||(p.length>2&&!lang)){ctx=p[2]||'';src=p[3]||''}else{ctx=p[1]||'';src=p[2]||''}
@@ -420,7 +420,7 @@ document.addEventListener('click',e=>{
 document.addEventListener('change',e=>{
   if(e.target.id==='qm'){mode=e.target.value;queue=[];next()}
   if(e.target.id==='ql'){qlang=e.target.value;queue=[];score=0;total=0;next()}
-  if(e.target.id==='file'&&e.target.files[0])e.target.files[0].text().then(t=>{$('ta').value=t});
+  if(e.target.id==='file'&&e.target.files[0])e.target.files[0].text().then(t=>{$('ta').value=t.replace(/^\ufeff/,'')});
 });
 window.addEventListener('error',e=>{$('err').textContent='Error: '+e.message});
 window.addEventListener('unhandledrejection',e=>{$('err').textContent='Error: '+((e.reason&&e.reason.message)||e.reason)});
