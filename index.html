@@ -171,14 +171,74 @@ async function tran(w,from,to){
   return '';
 }
 
-async function lookup(w,lang,ctx){
-  const r={word:w,lang,def:'',pos:'',ex:'',trs:{},ctx:ctx||'',senses:[]};
+async function fetchSenses(w,lang){
+  const r={senses:[]};
   if(lang!=='en')await nativeWikt(w,lang,r);
   if(!r.senses.length)await dict1(w,lang,r);
   if(!r.senses.length)await enWikt(w,lang,r);
+  return r.senses;
+}
+
+const L=a=>new Set(a.split(' '));
+const FORM={
+  en:{lead:L('uk us british american canadian australian obsolete archaic dated rare nonstandard alternative standard informal simple present past third-person first-person second-person third first second plural singular comparative superlative gerund participle inflection abbreviation contraction misspelling feminine masculine neuter genitive dative accusative nominative'),
+    of:/\bof\s+([\p{L}'-]+)[\s.;:]*$/iu,
+    der:/^(?:the\s+)?(?:act|action|process|state|condition|quality|fact|practice|result|degree)\s+of\s+(?:being\s+|doing\s+|having\s+|making\s+)?([\p{L}'-]+)[\s.]*$/iu},
+  es:{lead:L('forma variante plural femenino masculino participio gerundio primera segunda tercera apócope diminutivo aumentativo superlativo grafía conjugación imperativo'),
+    of:/\b(?:de|del)\s+([\p{L}-]+)[\s.;:]*$/iu,
+    der:/^(?:acción y efecto|acción|efecto|cualidad|calidad|estado|condición)\s+de\s+(?:ser\s+)?([\p{L}-]+)[\s.]*$/iu},
+  fr:{lead:L('participe pluriel féminin masculin singulier forme variante première deuxième troisième orthographe graphie conjugaison infinitif subjonctif indicatif impératif'),
+    of:/(?:\bde\s+|\bdu\s+|\bd['’])([\p{L}-]+)[\s.;:]*$/iu,
+    der:/^(?:action|fait|état|qualité|propriété|résultat|caractère)\s+(?:de\s+|du\s+|d['’])(?:être\s+)?([\p{L}-]+)[\s.]*$/iu}
+};
+function formRoot(def,lang,word){
+  const R=FORM[lang],d=String(def||'').replace(/\([^)]*\)/g,'').trim();
+  if(!R||!d||d.split(/\s+/).length>16)return '';
+  const wl=word.toLowerCase();let root='';
+  const first=d.split(/[\s,]+/)[0].toLowerCase().replace(/[^\p{L}-]/gu,'');
+  if(R.lead.has(first)){const m=d.match(R.of);if(m)root=m[1]}
+  if(!root){
+    const m=d.match(R.der);
+    if(m){const b=m[1].toLowerCase(),n=Math.min(3,wl.length,b.length);if(wl.slice(0,n)===b.slice(0,n))root=m[1]}
+  }
+  return root&&root.toLowerCase()!==wl?root:'';
+}
+async function withRoot(w,lang,senses,depth){
+  const hit=senses.find(s=>formRoot(s.def,lang,w));
+  if(!hit||depth>=3)return {senses,root:''};
+  const root=formRoot(hit.def,lang,w),rs=await fetchSenses(root,lang);
+  if(!rs.length)return {senses,root:''};
+  const deep=await withRoot(root,lang,rs,depth+1);
+  const own=senses.filter(s=>!formRoot(s.def,lang,w));
+  return {senses:[...deep.senses,...own].slice(0,12),root:deep.root||root};
+}
+
+async function gloss(w,lang,pos){
+  const tmp={senses:[]};
+  await enWikt(w,lang,tmp);
+  const bad=/^(plural|feminine|masculine|inflection|alternative|obsolete|misspelling|present|past|first|second|third|singular|archaic|nonstandard)\b[^.]*\bof\b/i;
+  const ok=tmp.senses.filter(x=>x.def&&!bad.test(x.def)),p3=(pos||'').slice(0,3).toLowerCase();
+  const m=ok.find(x=>p3&&x.pos.slice(0,3)===p3)||ok[0];
+  if(!m)return '';
+  return m.def.replace(/\([^)]*\)/g,'').split(/[;,]/).map(x=>x.trim()).filter(Boolean).slice(0,2).join(', ');
+}
+
+async function lookup(w,lang,ctx){
+  const r={word:w,lang,def:'',pos:'',ex:'',trs:{},ctx:ctx||'',senses:[],root:''};
+  const base=await fetchSenses(w,lang),wr=await withRoot(w,lang,base,0);
+  r.senses=wr.senses;r.root=wr.root;
   pick(r);
-  const ks=otherLangs(lang),res=await Promise.all(ks.map(k=>tran(w,lang,k)));
-  ks.forEach((k,i)=>{if(res[i])r.trs[k]=res[i]});
+  const ks=otherLangs(lang);
+  let g='';
+  if(lang!=='en')g=await gloss(r.root||w,lang,r.pos);
+  if(g){
+    r.trs.en=g;
+    const k=ks.find(x=>x!=='en'),t=await tran(g.split(',')[0].trim(),'en',k);
+    if(t)r.trs[k]=t;
+  }else{
+    const res=await Promise.all(ks.map(k=>tran(w,lang,k)));
+    ks.forEach((k,i)=>{if(res[i])r.trs[k]=res[i]});
+  }
   return r;
 }
 
@@ -269,7 +329,7 @@ function quizHTML(){
   }).join('');
   if(q.done){
     const tl=trLine(w);
-    h+='<div class="info"><b>'+esc(w.word)+'</b>'+(tl?'<br>'+esc(tl):'')+'<br>'+esc(w.def)+(w.ex?'<br><i>“'+esc(w.ex)+'”</i>':'')+(w.ctx?'<br><span class="mut">Where you read it: “'+esc(w.ctx)+'”</span>':'')+'</div><button class="go" id="nx">Next word</button>';
+    h+='<div class="info"><b>'+esc(w.word)+'</b>'+(w.root?' <span class="mut">(form of '+esc(w.root)+')</span>':'')+(tl?'<br>'+esc(tl):'')+'<br>'+esc(w.def)+(w.ex?'<br><i>“'+esc(w.ex)+'”</i>':'')+(w.ctx?'<br><span class="mut">Where you read it: “'+esc(w.ctx)+'”</span>':'')+'</div><button class="go" id="nx">Next word</button>';
   }
   return h;
 }
@@ -292,7 +352,7 @@ function wordsHTML(){
   words.forEach((w,i)=>{
     if(i===ei){h+=editHTML(w,i);return}
     const tl=trLine(w);
-    h+='<div class="wd"><div><b>'+esc(w.word)+'</b> <span class="tag">'+w.lang+'</span> <span class="mut">'+esc(w.pos)+'</span>'+(tl?'<div>'+esc(tl)+'</div>':'')+
+    h+='<div class="wd"><div><b>'+esc(w.word)+'</b> <span class="tag">'+w.lang+'</span> <span class="mut">'+esc(w.pos)+'</span>'+(w.root?' <span class="tag">form of '+esc(w.root)+'</span>':'')+(tl?'<div>'+esc(tl)+'</div>':'')+
       '<div class="mut">'+(w.def?esc(w.def):'No definition yet.')+'</div></div>'+
       '<div class="act">'+(w.def?'':'<button class="plain" data-r="'+i+'">Retry</button>')+'<button class="plain" data-e="'+i+'">Edit</button><button class="plain'+(di===i?' warn':'')+'" data-d="'+i+'" aria-label="Delete">'+(di===i?'Delete?':'✕')+'</button></div></div>';
   });
