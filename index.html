@@ -63,7 +63,7 @@ label{display:block;margin-top:10px}
 </div>
 <script>
 const KEY='vocab.v1',LANGS={en:'English',es:'Spanish',fr:'French'};
-let words=load(),tab='quiz',mode='w2d',qlang='en',q=null,score=0,total=0,queue=[],ei=-1,di=-1,net=false;
+let words=load(),tab='quiz',mode='w2d',qlang='en',q=null,score=0,total=0,queue=[],ei=-1,di=-1,net=false,fails=new Set();
 function load(){try{return JSON.parse(localStorage.getItem(KEY))||[]}catch(e){return[]}}
 function save(){try{localStorage.setItem(KEY,JSON.stringify(words))}catch(e){}}
 const $=id=>document.getElementById(id);
@@ -82,31 +82,66 @@ function pick(r,i){
   r.def=S[i].def;r.pos=S[i].pos;r.ex=S[i].ex;
 }
 
-async function lookup(w,lang,ctx){
-  const r={word:w,lang,def:'',pos:'',ex:'',tr:'',ctx:ctx||'',senses:[]};
+const strip=h=>{try{return (new DOMParser().parseFromString(String(h),'text/html').body.textContent||'').replace(/\s+/g,' ').trim()}catch(e){return ''}};
+const fail=n=>{net=true;fails.add(n)};
+
+async function dict1(w,lang,r){
   try{
     const x=await fetch('https://api.dictionaryapi.dev/api/v2/entries/'+lang+'/'+encodeURIComponent(w));
     if(x.ok){
       const j=await x.json();
       for(const e of j)for(const m of e.meanings||[])for(const d of m.definitions||[])
-        if(r.senses.length<10)r.senses.push({pos:m.partOfSpeech||'',def:d.definition,ex:d.example||''});
-    }else if(x.status!==404)net=true;
-  }catch(e){net=true}
-  pick(r);
+        if(d.definition&&r.senses.length<10)r.senses.push({pos:m.partOfSpeech||'',def:d.definition,ex:d.example||''});
+    }else if(x.status!==404)fail('Dictionary API');
+  }catch(e){fail('Dictionary API')}
+}
+
+async function wikt(w,lang,r){
+  for(const t of new Set([w,w.toLowerCase()])){
+    try{
+      const x=await fetch('https://en.wiktionary.org/api/rest_v1/page/definition/'+encodeURIComponent(t));
+      if(x.ok){
+        const j=await x.json();
+        for(const e of j[lang]||[])for(const d of e.definitions||[]){
+          const def=strip(d.definition);
+          if(def&&r.senses.length<10)r.senses.push({pos:(e.partOfSpeech||'').toLowerCase(),def,ex:strip((d.examples||[])[0]||'')});
+        }
+        if(r.senses.length)return;
+      }else if(x.status!==404)fail('Wiktionary');
+    }catch(e){fail('Wiktionary')}
+  }
+}
+
+async function tran(w,lang){
+  const to=lang==='en'?'es':'en';
   try{
-    const to=lang==='en'?'es':'en';
+    const x=await fetch('https://translate.googleapis.com/translate_a/single?client=gtx&sl='+lang+'&tl='+to+'&dt=t&q='+encodeURIComponent(w));
+    const j=await x.json();
+    const t=(j[0]||[]).map(s=>s[0]).join('').trim();
+    return t&&t.toLowerCase()!==w.toLowerCase()?t:'';
+  }catch(e){fail('Google Translate')}
+  try{
     const x=await fetch('https://api.mymemory.translated.net/get?q='+encodeURIComponent(w)+'&langpair='+lang+'|'+to);
     const j=await x.json();
-    r.tr=(j.responseData&&j.responseData.translatedText)||'';
-    if(r.tr.toLowerCase()===w.toLowerCase())r.tr='';
-  }catch(e){net=true}
+    const t=((j.responseData&&j.responseData.translatedText)||'').trim();
+    return t&&t.toLowerCase()!==w.toLowerCase()?t:'';
+  }catch(e){fail('MyMemory')}
+  return '';
+}
+
+async function lookup(w,lang,ctx){
+  const r={word:w,lang,def:'',pos:'',ex:'',tr:'',ctx:ctx||'',senses:[]};
+  await dict1(w,lang,r);
+  if(!r.senses.length)await wikt(w,lang,r);
+  pick(r);
+  r.tr=await tran(w,lang);
   return r;
 }
 
-function netMsg(){return net?' Some lookups failed to reach the dictionary service. Check your connection, and make sure you opened the hosted page in your browser, not a preview inside another app.':''}
+function netMsg(){return fails.size?' Could not reach: '+[...fails].join(', ')+'. If this keeps happening, pause your VPN or content blocker for this site and tell me which names are listed.':''}
 
 async function addWords(){
-  const def=$('dl').value,todo=[];net=false;
+  const def=$('dl').value,todo=[];net=false;fails.clear();
   $('ta').value.split(/\r?\n/).map(l=>l.trim()).filter(Boolean).forEach((l,i)=>{
     const p=l.split(',').map(s=>s.trim());
     const w=p[0].replace(/^["']|["']$/g,'');
@@ -132,7 +167,7 @@ async function addWords(){
 }
 
 async function retry(list){
-  net=false;
+  net=false;fails.clear();
   for(const i of list){
     const w=words[i],r=await lookup(w.word,w.lang,w.ctx);
     if(r.def)words[i]=r;
