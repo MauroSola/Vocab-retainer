@@ -66,12 +66,14 @@ button:disabled{opacity:.5}
 <script>
 const KEY='vocab.v1',LANGS={en:'English',es:'Spanish',fr:'French'};
 let words=load(),tab='quiz',mode='w2d',qlang='en',q=null,score=0,total=0,queue=[],ei=-1,di=-1,net=false,fails=new Set();
-function load(){try{return JSON.parse(localStorage.getItem(KEY))||[]}catch(e){return[]}}
+function load(){try{const a=JSON.parse(localStorage.getItem(KEY))||[];a.forEach(w=>{if(!w.trs){w.trs={};if(w.tr)w.trs[w.lang==='en'?'es':'en']=w.tr}});return a}catch(e){return[]}}
 function save(){try{localStorage.setItem(KEY,JSON.stringify(words))}catch(e){}}
 const $=id=>document.getElementById(id);
 const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const shuffle=a=>{a=[...a];for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]]}return a};
 const langOpts=v=>Object.keys(LANGS).map(k=>'<option value="'+k+'"'+(k===v?' selected':'')+'>'+LANGS[k]+'</option>').join('');
+const otherLangs=l=>Object.keys(LANGS).filter(k=>k!==l);
+const trLine=w=>otherLangs(w.lang).filter(k=>w.trs&&w.trs[k]).map(k=>k.toUpperCase()+': '+w.trs[k]).join(' · ');
 
 function pick(r,i){
   const S=r.senses||[];
@@ -99,7 +101,7 @@ async function dict1(w,lang,r){
   }catch(e){fail('Dictionary API')}
 }
 
-async function wikt(w,lang,r){
+async function enWikt(w,lang,r){
   for(const t of new Set([w,w.toLowerCase()])){
     try{
       const x=await F('https://en.wiktionary.org/api/rest_v1/page/definition/'+encodeURIComponent(t));
@@ -115,16 +117,53 @@ async function wikt(w,lang,r){
   }
 }
 
-async function tran(w,lang){
-  const to=lang==='en'?'es':'en';
+const NATIVE={
+  es:{lang:/^==\s*\{\{lengua\|es\}\}\s*==\s*$/i,pos:/^={3,}\s*\{\{([^|}]+)\|es[^}]*\}\}\s*={3,}\s*$/i,def:/^;\s*\d+[^:]*:\s*(.*)$/},
+  fr:{lang:/^==\s*\{\{langue\|fr\}\}\s*==\s*$/i,pos:/^={3,}\s*\{\{S\|([^|}]+)\|fr[^}]*\}\}.*$/i,def:/^#(?![*:#])\s*(.*)$/}
+};
+function wtClean(t){
+  for(let i=0;i<6&&/\{\{[^{}]*\}\}/.test(t);i++)t=t.replace(/\{\{([^{}]*)\}\}/g,(m,b)=>{
+    const p=b.split('|'),n=p[0].trim().toLowerCase();
+    if(['plm','lien','lien-ancre','w','p','term'].includes(n))return p[1]||'';
+    if(n==='l'||n==='l-self')return p[2]||p[1]||'';
+    return '';
+  });
+  return t.replace(/<ref[^>]*>.*?<\/ref>/gs,'').replace(/<[^>]+>/g,'').replace(/\[\[(?:[^\]|]*\|)?([^\]]*)\]\]/g,'$1').replace(/'{2,}/g,'').replace(/\(\s*\)/g,'').replace(/\s+/g,' ').replace(/^[\s:;,.\-]+/,'').trim();
+}
+function parseWT(text,lang){
+  const R=NATIVE[lang],out=[];let inLang=false,pos='';
+  for(const raw of text.split(/\r?\n/)){
+    const line=raw.trim();
+    if(/^==[^=]/.test(line)){inLang=R.lang.test(line);pos='';continue}
+    if(!inLang)continue;
+    const pm=line.match(R.pos);
+    if(pm){pos=pm[1].trim();continue}
+    if(/^={3,}/.test(line)){pos='';continue}
+    const dm=pos&&line.match(R.def);
+    if(dm){const d=wtClean(dm[1]);if(d.length>2&&out.length<10)out.push({pos,def:d,ex:''})}
+  }
+  return out;
+}
+async function nativeWikt(w,lang,r){
+  for(const t of new Set([w,w.toLowerCase()])){
+    try{
+      const x=await F('https://'+lang+'.wiktionary.org/w/api.php?action=parse&prop=wikitext&format=json&formatversion=2&redirects=1&origin=*&page='+encodeURIComponent(t));
+      if(!x.ok){fail('Wiktionary ('+LANGS[lang]+')');return}
+      const j=await x.json(),wt=j.parse&&j.parse.wikitext;
+      const text=typeof wt==='string'?wt:((wt&&wt['*'])||'');
+      if(text){const s=parseWT(text,lang);if(s.length){r.senses.push(...s);return}}
+    }catch(e){fail('Wiktionary ('+LANGS[lang]+')');return}
+  }
+}
+
+async function tran(w,from,to){
   try{
-    const x=await F('https://translate.googleapis.com/translate_a/single?client=gtx&sl='+lang+'&tl='+to+'&dt=t&q='+encodeURIComponent(w));
+    const x=await F('https://translate.googleapis.com/translate_a/single?client=gtx&sl='+from+'&tl='+to+'&dt=t&q='+encodeURIComponent(w));
     const j=await x.json();
-    const t=(j[0]||[]).map(s=>s[0]).join('').trim();
-    return t&&t.toLowerCase()!==w.toLowerCase()?t:'';
+    return (j[0]||[]).map(s=>s[0]).join('').trim();
   }catch(e){fail('Google Translate')}
   try{
-    const x=await F('https://api.mymemory.translated.net/get?q='+encodeURIComponent(w)+'&langpair='+lang+'|'+to);
+    const x=await F('https://api.mymemory.translated.net/get?q='+encodeURIComponent(w)+'&langpair='+from+'|'+to);
     const j=await x.json();
     const t=((j.responseData&&j.responseData.translatedText)||'').trim();
     return t&&t.toLowerCase()!==w.toLowerCase()?t:'';
@@ -133,11 +172,13 @@ async function tran(w,lang){
 }
 
 async function lookup(w,lang,ctx){
-  const r={word:w,lang,def:'',pos:'',ex:'',tr:'',ctx:ctx||'',senses:[]};
-  await dict1(w,lang,r);
-  if(!r.senses.length)await wikt(w,lang,r);
+  const r={word:w,lang,def:'',pos:'',ex:'',trs:{},ctx:ctx||'',senses:[]};
+  if(lang!=='en')await nativeWikt(w,lang,r);
+  if(!r.senses.length)await dict1(w,lang,r);
+  if(!r.senses.length)await enWikt(w,lang,r);
   pick(r);
-  r.tr=await tran(w,lang);
+  const ks=otherLangs(lang),res=await Promise.all(ks.map(k=>tran(w,lang,k)));
+  ks.forEach((k,i)=>{if(res[i])r.trs[k]=res[i]});
   return r;
 }
 
@@ -179,7 +220,29 @@ async function retry(list){
     if(r.def)words[i]=r;
   }
   save();queue=[];q=null;render();
-  if(net)alert('Could not reach the dictionary service.'+netMsg());
+  if(net)alert('Could not reach the lookup services.'+netMsg());
+}
+
+async function fillTrans(){
+  net=false;fails.clear();
+  const todo=words.filter(w=>otherLangs(w.lang).some(k=>!(w.trs&&w.trs[k])));
+  for(let i=0;i<todo.length;i+=4){
+    await Promise.all(todo.slice(i,i+4).map(async w=>{
+      w.trs=w.trs||{};
+      for(const k of otherLangs(w.lang))if(!w.trs[k]){const t=await tran(w.word,w.lang,k);if(t)w.trs[k]=t}
+    }));
+    save();
+  }
+  render();
+  if(fails.size)alert('Some translations failed.'+netMsg());
+}
+
+async function lookAgain(){
+  const w=words[ei];net=false;fails.clear();
+  const r=await lookup(w.word,w.lang,($('e-ctx').value||'').trim()||w.ctx);
+  if(r.def||Object.keys(r.trs).length)words[ei]=r;
+  save();queue=[];q=null;render();
+  if(net)alert('Could not reach the lookup services.'+netMsg());
 }
 
 function next(){
@@ -204,7 +267,10 @@ function quizHTML(){
     if(q.done){if(o===w)c+=' ok';else if(i===q.pick)c+=' bad'}
     return '<button class="'+c+'" data-i="'+i+'">'+esc(mode==='w2d'?o.def:o.word)+'</button>';
   }).join('');
-  if(q.done)h+='<div class="info"><b>'+esc(w.word)+'</b>'+(w.tr?' means “'+esc(w.tr)+'”':'')+'<br>'+esc(w.def)+(w.ex?'<br><i>“'+esc(w.ex)+'”</i>':'')+(w.ctx?'<br><span class="mut">Where you read it: “'+esc(w.ctx)+'”</span>':'')+'</div><button class="go" id="nx">Next word</button>';
+  if(q.done){
+    const tl=trLine(w);
+    h+='<div class="info"><b>'+esc(w.word)+'</b>'+(tl?'<br>'+esc(tl):'')+'<br>'+esc(w.def)+(w.ex?'<br><i>“'+esc(w.ex)+'”</i>':'')+(w.ctx?'<br><span class="mut">Where you read it: “'+esc(w.ctx)+'”</span>':'')+'</div><button class="go" id="nx">Next word</button>';
+  }
   return h;
 }
 
@@ -212,19 +278,21 @@ function editHTML(w,i){
   const S=w.senses||[];
   return '<div class="wd"><div style="width:100%"><b>'+esc(w.word)+'</b> <span class="tag">'+w.lang+'</span>'+
     '<label class="mut">Definition</label><textarea id="e-def" rows="3">'+esc(w.def)+'</textarea>'+
-    '<label class="mut">Translation</label><input id="e-tr" value="'+esc(w.tr)+'">'+
+    otherLangs(w.lang).map(k=>'<label class="mut">Translation ('+LANGS[k]+')</label><input id="e-tr-'+k+'" value="'+esc((w.trs||{})[k]||'')+'">').join('')+
     '<label class="mut">Example</label><input id="e-ex" value="'+esc(w.ex)+'">'+
     '<label class="mut">Where you read it (optional)</label><input id="e-ctx" value="'+esc(w.ctx)+'">'+
     (S.length>1?'<p class="mut">Other meanings found. Tap one to use it:</p>'+S.map((s,k)=>'<button class="opt" data-s="'+k+'"><span class="mut">'+esc(s.pos)+'</span> '+esc(s.def)+'</button>').join(''):'')+
-    '<div class="row" style="margin-top:10px"><button class="pri" id="e-save">Save</button><button id="e-cancel" class="plain">Cancel</button></div></div></div>';
+    '<div class="row" style="margin-top:10px"><button class="pri" id="e-save">Save</button><button id="e-cancel" class="plain">Cancel</button><button id="e-lu" class="plain">Look up again (replaces everything here)</button></div></div></div>';
 }
 
 function wordsHTML(){
   if(!words.length)return '<p class="mut">No words yet. Add some in the Add words tab.</p>';
-  let h='<div class="row"><button id="ex" class="plain">Export CSV</button>'+(words.some(w=>!w.def)?'<button id="rall" class="plain">Retry missing</button>':'')+'<span class="mut">'+words.length+' words</span></div>';
+  const needTr=words.some(w=>otherLangs(w.lang).some(k=>!(w.trs&&w.trs[k])));
+  let h='<div class="row"><button id="ex" class="plain">Export CSV</button>'+(words.some(w=>!w.def)?'<button id="rall" class="plain">Retry missing</button>':'')+(needTr?'<button id="rtr" class="plain">Fill translations</button>':'')+'<span class="mut">'+words.length+' words</span></div>';
   words.forEach((w,i)=>{
     if(i===ei){h+=editHTML(w,i);return}
-    h+='<div class="wd"><div><b>'+esc(w.word)+'</b> <span class="tag">'+w.lang+'</span> <span class="mut">'+esc(w.pos)+'</span>'+(w.tr?' · '+esc(w.tr):'')+
+    const tl=trLine(w);
+    h+='<div class="wd"><div><b>'+esc(w.word)+'</b> <span class="tag">'+w.lang+'</span> <span class="mut">'+esc(w.pos)+'</span>'+(tl?'<div>'+esc(tl)+'</div>':'')+
       '<div class="mut">'+(w.def?esc(w.def):'No definition yet.')+'</div></div>'+
       '<div class="act">'+(w.def?'':'<button class="plain" data-r="'+i+'">Retry</button>')+'<button class="plain" data-e="'+i+'">Edit</button><button class="plain'+(di===i?' warn':'')+'" data-d="'+i+'" aria-label="Delete">'+(di===i?'Delete?':'✕')+'</button></div></div>';
   });
@@ -240,12 +308,13 @@ function render(){
 
 function exportCSV(){
   const c=s=>'"'+String(s||'').replace(/"/g,'""')+'"';
-  const csv='word,lang,definition,translation,example,context\n'+words.map(w=>[w.word,w.lang,w.def,w.tr,w.ex,w.ctx].map(c).join(',')).join('\n');
+  const csv='word,lang,definition,en,es,fr,example,context\n'+words.map(w=>[w.word,w.lang,w.def,(w.trs||{}).en,(w.trs||{}).es,(w.trs||{}).fr,w.ex,w.ctx].map(c).join(',')).join('\n');
   const a=document.createElement('a');
   a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
   a.download='vocab.csv';a.click();
 }
 
+const busy=t=>{t.disabled=true;t.textContent='Working…'};
 document.addEventListener('click',e=>{
   const t=e.target.closest('button');if(!t)return;
   if(t.dataset.d===undefined&&di!==-1){di=-1;if(tab==='words'&&!t.dataset.e&&!t.dataset.s&&!t.dataset.r&&!t.id)render()}
@@ -253,8 +322,10 @@ document.addEventListener('click',e=>{
   if(t.id==='addbtn')return addWords();
   if(t.id==='start'||t.id==='nx')return next();
   if(t.id==='ex')return exportCSV();
-  if(t.id==='rall')return retry(words.map((w,i)=>w.def?-1:i).filter(i=>i>=0));
-  if(t.dataset.r!==undefined)return retry([+t.dataset.r]);
+  if(t.id==='rall'){busy(t);return retry(words.map((w,i)=>w.def?-1:i).filter(i=>i>=0))}
+  if(t.id==='rtr'){busy(t);return fillTrans()}
+  if(t.id==='e-lu'){busy(t);return lookAgain()}
+  if(t.dataset.r!==undefined){busy(t);return retry([+t.dataset.r])}
   if(t.dataset.i!==undefined&&q&&!q.done){
     q.pick=+t.dataset.i;q.done=true;total++;
     if(q.opts[q.pick]===q.w)score++;
@@ -270,7 +341,8 @@ document.addEventListener('click',e=>{
   if(t.id==='e-cancel'){ei=-1;return render()}
   if(t.id==='e-save'){
     const w=words[ei];
-    w.def=$('e-def').value.trim();w.tr=$('e-tr').value.trim();w.ex=$('e-ex').value.trim();w.ctx=$('e-ctx').value.trim();
+    w.def=$('e-def').value.trim();w.ex=$('e-ex').value.trim();w.ctx=$('e-ctx').value.trim();
+    w.trs={};otherLangs(w.lang).forEach(k=>{const v=$('e-tr-'+k).value.trim();if(v)w.trs[k]=v});
     save();ei=-1;queue=[];q=null;render();
   }
 });
