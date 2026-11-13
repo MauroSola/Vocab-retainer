@@ -84,6 +84,7 @@ function pick(r,i){
     S.forEach((s,k)=>{const h=(s.def+' '+s.ex).toLowerCase(),sc=toks.filter(t=>h.includes(t)).length;if(sc>bs){bs=sc;i=k}});
   }
   r.def=S[i].def;r.pos=S[i].pos;r.ex=S[i].ex;r.via=S[i].via||'';
+  r.root=S[i].rootOf||(S.some(x=>x.rootOf)?'':r.root);
 }
 
 const strip=h=>{try{return (new DOMParser().parseFromString(String(h),'text/html').body.textContent||'').replace(/\s+/g,' ').trim()}catch(e){return ''}};
@@ -215,9 +216,12 @@ async function withRoot(w,lang,senses,depth){
   const root=formRoot(hit.def,lang,w),rs=await fetchSenses(root,lang);
   if(!rs.length)return {senses,root:''};
   const deep=await withRoot(root,lang,rs,depth+1);
+  deep.senses.forEach(x=>{if(!x.rootOf)x.rootOf=deep.root||root});
   const own=senses.filter(s=>!formRoot(s.def,lang,w));
   return {senses:[...deep.senses,...own].slice(0,12),root:deep.root||root};
 }
+
+const cleanGloss=d=>String(d||'').replace(/\([^)]*\)/g,'').split(/[;,]/).map(x=>x.trim()).filter(Boolean).slice(0,2).join(', ');
 
 async function gloss(w,lang,pos){
   const tmp={senses:[]};
@@ -225,8 +229,35 @@ async function gloss(w,lang,pos){
   const bad=/^(plural|feminine|masculine|inflection|alternative|obsolete|misspelling|present|past|first|second|third|singular|archaic|nonstandard)\b[^.]*\bof\b/i;
   const ok=tmp.senses.filter(x=>x.def&&!bad.test(x.def)),p3=(pos||'').slice(0,3).toLowerCase();
   const m=ok.find(x=>p3&&x.pos.slice(0,3)===p3)||ok[0];
-  if(!m)return '';
-  return m.def.replace(/\([^)]*\)/g,'').split(/[;,]/).map(x=>x.trim()).filter(Boolean).slice(0,2).join(', ');
+  return m?cleanGloss(m.def):'';
+}
+
+async function tranPos(w,from,to,pos){
+  try{
+    const x=await F('https://translate.googleapis.com/translate_a/single?client=gtx&sl='+from+'&tl='+to+'&dt=t&dt=bd&q='+encodeURIComponent(w));
+    const j=await x.json(),p=(pos||'').toLowerCase().slice(0,3);
+    const g=p&&Array.isArray(j[1])?j[1].find(e=>e&&String(e[0]).toLowerCase().slice(0,3)===p&&Array.isArray(e[1])&&e[1].length):null;
+    if(g)return g[1].slice(0,2).join(', ');
+    return (j[0]||[]).map(z=>z[0]).join('').trim();
+  }catch(e){}
+  return tran(w,from,to);
+}
+
+async function senseTrans(w,s){
+  const ks=otherLangs(w.lang),out={};let done=false;
+  if(w.lang!=='en'){
+    const en=s.via==='en.wiktionary'?cleanGloss(s.def):await gloss(w.root||w.word,w.lang,s.pos);
+    if(en){out.en=en;const k=ks.find(x=>x!=='en'),t=await tran(en.split(',')[0].trim(),'en',k);if(t)out[k]=t;done=true}
+  }
+  if(!done){const res=await Promise.all(ks.map(k=>tranPos(w.word,w.lang,k,s.pos)));ks.forEach((k,i)=>{if(res[i])out[k]=res[i]})}
+  if(Object.keys(out).length)w.trs=out;
+}
+
+async function chooseSense(k){
+  const w=words[ei],s=w.senses[k];net=false;fails.clear();
+  pick(w,k);await senseTrans(w,s);
+  save();queue=[];render();
+  if(net)alert('Could not reach the translation service, so the translations were not updated.'+netMsg());
 }
 
 async function lookup(w,lang,ctx){
@@ -234,17 +265,7 @@ async function lookup(w,lang,ctx){
   const base=await fetchSenses(w,lang),wr=await withRoot(w,lang,base,0);
   r.senses=wr.senses;r.root=wr.root;r.rootTried=true;
   pick(r);
-  const ks=otherLangs(lang);
-  let g='';
-  if(lang!=='en')g=await gloss(r.root||w,lang,r.pos);
-  if(g){
-    r.trs.en=g;
-    const k=ks.find(x=>x!=='en'),t=await tran(g.split(',')[0].trim(),'en',k);
-    if(t)r.trs[k]=t;
-  }else{
-    const res=await Promise.all(ks.map(k=>tran(w,lang,k)));
-    ks.forEach((k,i)=>{if(res[i])r.trs[k]=res[i]});
-  }
+  await senseTrans(r,{pos:r.pos,via:r.via,def:r.def});
   return r;
 }
 
@@ -417,7 +438,7 @@ document.addEventListener('click',e=>{
     return render();
   }
   if(t.dataset.e!==undefined){ei=+t.dataset.e;return render()}
-  if(t.dataset.s!==undefined&&ei>=0){pick(words[ei],+t.dataset.s);save();queue=[];return render()}
+  if(t.dataset.s!==undefined&&ei>=0){busy(t);return chooseSense(+t.dataset.s)}
   if(t.id==='e-cancel'){ei=-1;return render()}
   if(t.id==='e-save'){
     const w=words[ei];
